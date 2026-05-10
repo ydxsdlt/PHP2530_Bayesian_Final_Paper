@@ -8,7 +8,7 @@ This repository contains the paper, code, and output files for my PHP2530 final 
 
 ### Paper files
 
-- **sample.tex**  
+- **main.tex**  
   Main LaTeX source file for the paper.
 
 - **sample.bib**  
@@ -63,6 +63,6 @@ This repository contains the paper, code, and output files for my PHP2530 final 
   - `simulation_diagnostics.csv`
 
 - The paper itself is compiled from:
-  - `sample.tex`
+  - `main.tex`
   - `sample.bib`
   - `style.sty`
