@@ -1,0 +1,371 @@
+\documentclass[twoside,11pt]{article}
+
+\usepackage{style}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{float}
+
+\ShortHeadings{Bayesian Joint Model for Multi-Reader Ordinal Ratings}{Zhu}
+\firstpageno{1}
+
+\begin{document}
+
+\title{
+A Bayesian Joint Model for Multi-Reader Ordinal Semantic Ratings with Missing Data for Malignancy Prediction\\
+\vspace{0.1in}
+PHP2530
+}
+
+\author{Peiye Zhu}
+
+\maketitle
+\date{}
+
+\section{Introduction}
+
+Pulmonary nodules are often characterized by radiologists using semantic imaging features such as spiculation, lobulation, and margin irregularity. These features are then used as predictors in models for malignancy. Although this workflow is common, it creates a statistical difficulty that is easy to overlook: the semantic predictors are not directly observed truth. Instead, they are reader-dependent ordinal ratings, disagreement across readers is common, and some reader-feature entries may be missing. In many practical analyses, these complications are simplified away by averaging scores across readers, selecting a single reader, or replacing multiple ratings with a consensus score before fitting an outcome model. Such strategies are convenient, but they discard uncertainty from the measurement stage before the prediction stage even begins.
+
+This paper develops a Bayesian joint model for this problem. I treat reader ratings as noisy ordinal measurements of latent semantic feature values and propagate the resulting uncertainty directly into a downstream malignancy model. The proposed framework addresses several complications jointly: reader-specific thresholds, reader-feature-specific sensitivity, missing reader ratings, correlation among latent semantic features, additional non-semantic predictors, and missingness in those non-semantic predictors. The key idea is that when predictors are measured with reader-specific noise, they should not be treated as fixed observed quantities in the outcome model.
+
+Related Bayesian work has studied multirater ordinal data and Bayesian missing-data models, but these components are often developed separately in the literature \citep{Johnson1996,Rubin1976}. The contribution of this paper is a unified Bayesian framework for multi-reader ordinal semantic ratings with missing data and malignancy prediction, combining several modeling components that are often handled one at a time. Relative to simpler reader-collapsing approaches, the proposed method preserves measurement uncertainty and carries it into the prediction stage.
+
+The remainder of the paper is organized as follows. Section 2 introduces the data structure and notation. Section 3 presents the model and explains how it addresses the main statistical complications. Section 4 describes posterior computation. Section 5 presents a simulation study comparing the proposed method with simpler alternatives.
+
+\section{Data Structure and Notation}
+
+For each case $i=1,\dots,n$, suppose there are $p$ semantic imaging features, $R$ readers, a binary malignancy outcome, and $q$ additional non-semantic predictors. Let
+\[
+R_{ijr} \in \{1,\dots,K\}
+\]
+denote the ordinal rating assigned by reader $r$ to feature $j$ for case $i$, where larger categories correspond to greater semantic severity. Let
+\[
+X_{ij}
+\]
+denote the latent true severity of semantic feature $j$ for case $i$. Let
+\[
+Y_i \in \{0,1\}
+\]
+denote the malignancy outcome, where $Y_i=1$ indicates malignancy. Let
+\[
+Z_i = (Z_{i1},\dots,Z_{iq})^\top
+\]
+denote a vector of additional non-semantic predictors.
+
+Some reader ratings may be missing. I write the observed and missing rating collections as $R^{obs}$ and $R^{mis}$. Likewise, some components of $Z_i$ may be missing, and I write the observed and missing parts as $Z^{obs}$ and $Z^{mis}$.
+
+The statistical objective is to learn about the latent semantic features $X_{ij}$ and the malignancy risk model using only the observed reader ratings, the observed non-semantic predictors, and the observed outcomes. The central difficulty is that the semantic features entering the outcome model are not directly observed. They must be inferred from noisy, reader-dependent, and incomplete ordinal measurements.
+
+\section{Methodology}
+
+\subsection{Reader ratings as ordinal measurements of latent semantic severity}
+
+The first part of the model links the latent semantic features to the observed reader ratings. For each feature-reader pair, I use an ordinal logistic model
+\[
+\Pr(R_{ijr} \le k \mid X_{ij}, c_{jrk}, a_{jr})
+=
+\operatorname{logit}^{-1}(c_{jrk} - a_{jr}X_{ij}),
+\qquad k=1,\dots,K-1.
+\]
+
+Here, $c_{jr1} < \cdots < c_{jr,K-1}$ are reader-feature-specific thresholds and $a_{jr}>0$ is a reader-feature-specific slope. The thresholds determine where a reader places category boundaries, while the slope determines how sharply ratings respond to changes in the latent semantic feature. This likelihood is natural because the ratings are ordered categories rather than continuous measurements or unordered labels. The negative sign implies that when $a_{jr}>0$, larger latent severity shifts probability toward higher rating categories.
+
+This formulation captures two kinds of reader heterogeneity. First, readers may be stricter or more lenient through the thresholds. Second, reader-feature pairs may differ in how sharply they respond to the same latent feature through the slopes. In this way, the model allows disagreement between readers to arise naturally from the measurement layer rather than treating it as a nuisance to be removed in preprocessing.
+
+\subsection{Latent semantic feature distribution}
+
+For each case, let
+\[
+X_i = (X_{i1},\dots,X_{ip})^\top.
+\]
+I model the latent semantic feature vector as
+\[
+X_i \sim N_p(0,C_X),
+\]
+where $C_X$ is a correlation matrix. This choice treats the latent semantic traits as continuous and allows them to be correlated, which is more realistic than assuming complete independence. At the same time, using a correlation matrix rather than a full covariance matrix fixes the marginal variances at 1, which helps identify the latent scale. This becomes particularly important once reader-feature-specific slopes are introduced, because otherwise the model can trade off the scale of $X_{ij}$ against the scale of the slopes and estimate them less reliably.
+
+\subsection{Outcome model}
+
+The malignancy outcome is modeled through logistic regression using both the latent semantic features and the non-semantic predictors:
+\[
+Y_i \mid X_i,Z_i,\beta,\gamma \sim \operatorname{Bernoulli}(\pi_i),
+\]
+with
+\[
+\operatorname{logit}(\pi_i)
+=
+\beta_0 + \sum_{j=1}^p \beta_j X_{ij} + \sum_{\ell=1}^q \gamma_\ell Z_{i\ell}.
+\]
+
+The Bernoulli likelihood is appropriate because the outcome is binary. The key feature of this model is that it uses the latent semantic features themselves, rather than reader averages or one reader's scores. In this way, uncertainty from the semantic measurement layer is carried directly into the malignancy model.
+
+\subsection{Missing reader ratings and missing non-semantic predictors}
+
+For missing reader ratings, I assume that missingness is at random. More specifically, after conditioning on the modeled observed information, the probability that a reader rating is missing does not depend on the unobserved rating itself. Under this assumption, I do not fill in missing reader ratings before fitting the model. Instead, I work with the observed-rating likelihood and integrate over the unobserved categories.
+
+For missing non-semantic predictors, I use a different strategy. Since $Z_i$ enters the outcome model continuously, it is more natural to model the full predictor vector and sample missing components directly. Specifically, I assume
+\[
+Z_i \sim N_q(0,C_Z),
+\]
+where $C_Z$ is a correlation matrix. This provides a coherent joint model for the non-semantic predictors and allows observed components of $Z_i$ to inform the missing ones.
+
+Thus, both forms of missingness are handled within the Bayesian framework, but in different ways. Missing ordinal reader ratings are marginalized, while missing continuous predictors are sampled explicitly.
+
+\subsection{Prior distributions}
+
+The regression coefficients in the outcome model receive weakly informative normal priors:
+\[
+\beta_0 \sim N(0,2.5^2), \qquad
+\beta_j \sim N(0,1.5^2), \qquad
+\gamma_\ell \sim N(0,1.5^2).
+\]
+These priors are centered at zero because there is no strong prior reason to prefer positive over negative effects, and their scales are chosen to be weakly informative on the log-odds scale rather than overly restrictive.
+
+For the slope hierarchy, I define
+\[
+\alpha_{jr} = \log a_{jr},
+\qquad
+\alpha_{jr} \mid \mu_a,\sigma_a \sim N(\mu_a,\sigma_a^2),
+\]
+with hyperpriors
+\[
+\mu_a \sim N(0,1), \qquad
+\sigma_a \sim \text{half-normal}(0,0.5).
+\]
+Modeling log-slopes rather than slopes directly guarantees positivity. Centering $\mu_a$ at zero centers the prior for $a_{jr}$ around 1, which corresponds to the simpler baseline model in which latent severity enters the cumulative logit with coefficient 1. The half-normal prior on $\sigma_a$ is a standard weakly informative prior for a positive scale parameter and favors moderate heterogeneity over extreme variation.
+
+For thresholds, I use weakly informative normal priors subject to the ordering constraint:
+\[
+(c_{jr1},\dots,c_{jr,K-1}) \sim N(0,2^2)
+\]
+with $c_{jr1}<\cdots<c_{jr,K-1}$. These priors are wide enough to allow flexible cutpoint placement while discouraging implausibly extreme thresholds.
+
+Finally, both correlation matrices are assigned LKJ priors through their Cholesky factors:
+\[
+C_X \sim \text{LKJ}(2), \qquad C_Z \sim \text{LKJ}(2).
+\]
+These priors mildly favor weaker correlations without ruling out meaningful dependence.
+
+\subsection{Assumptions and limitations}
+
+The proposed framework relies on several working assumptions. First, reader ratings are assumed to be ordered categorical measurements of latent continuous semantic severity. Second, missingness in reader ratings and non-semantic predictors is assumed to be at random after conditioning on the modeled observed information. Third, the latent semantic features and non-semantic predictors are modeled with multivariate normal working distributions. Fourth, conditional on the latent semantic layer and the reader-specific parameters, the observed ratings are independent. Fifth, conditional on $X_i$, $Z_i$, and the outcome-model coefficients, the outcome $Y_i$ is independent of the reader-specific measurement parameters.
+
+The main strength of the method is that it keeps the semantic measurement process inside the model rather than replacing it with a preprocessing rule. Its main limitation is computational cost. The model contains latent semantic features, reader-specific threshold vectors, hierarchical slopes, and two correlation structures, so fitting it is substantially heavier than standard logistic regression. In addition, the model depends on working assumptions such as ordinal logistic measurement, multivariate normal latent structure, and missing-at-random mechanisms. These assumptions are reasonable for the present simulation study, but they should still be viewed as modeling choices rather than universal truths.
+
+\section{Computation}
+
+\subsection{Posterior structure}
+
+Let $\alpha$ denote the matrix of log-slopes, and let $Z=(Z^{obs},Z^{mis})$. By Bayes' rule, the posterior distribution is proportional to the joint density of the observed data and the unknown quantities. Under the model assumptions in Section 3, that joint density factors into an outcome component, a reader-rating component, and prior components for the latent variables and model parameters.
+
+The full conceptual posterior is
+\[
+\begin{aligned}
+&p(X,c,\beta,\gamma,\alpha,\mu_a,\sigma_a,C_X,C_Z,Z^{mis},R^{mis}\mid R^{obs},Z^{obs},Y) \\
+&\propto
+p(Y\mid X,Z^{obs},Z^{mis},\beta,\gamma)\,
+p(R^{obs},R^{mis}\mid X,c,\alpha)\,
+p(X\mid C_X)\,
+p(Z^{obs},Z^{mis}\mid C_Z) \\
+&\qquad \times
+p(c)\,
+p(\beta)\,
+p(\gamma)\,
+p(\alpha\mid \mu_a,\sigma_a)\,
+p(\mu_a)\,
+p(\sigma_a)\,
+p(C_X)\,
+p(C_Z).
+\end{aligned}
+\]
+
+In practice, missing reader ratings are marginalized and missing $Z$ values are sampled explicitly. The practical posterior is therefore
+\[
+\begin{aligned}
+&p(X,c,\beta,\gamma,\alpha,\mu_a,\sigma_a,C_X,C_Z,Z^{mis}\mid R^{obs},Z^{obs},Y) \\
+&\propto
+p(Y\mid X,Z^{obs},Z^{mis},\beta,\gamma)\,
+p(R^{obs}\mid X,c,\alpha)\,
+p(X\mid C_X)\,
+p(Z^{obs},Z^{mis}\mid C_Z) \\
+&\qquad \times
+p(c)\,
+p(\beta)\,
+p(\gamma)\,
+p(\alpha\mid \mu_a,\sigma_a)\,
+p(\mu_a)\,
+p(\sigma_a)\,
+p(C_X)\,
+p(C_Z).
+\end{aligned}
+\]
+
+This proportional form follows from the conditional independence structure described above. The outcome likelihood depends on $(X,Z,\beta,\gamma)$, the reader-rating likelihood depends on $(X,c,\alpha)$, and the prior is specified hierarchically through separate components for the latent features, non-semantic predictors, thresholds, regression coefficients, slope parameters, and correlation matrices. The difference between the conceptual and practical posteriors comes from how the two types of missing data are handled. Missing reader ratings are discrete ordinal quantities, and under the missing-at-random assumption it is natural to integrate over them. Missing non-semantic predictors are continuous and enter the outcome model directly, so they are more conveniently treated as ordinary unknown parameters.
+
+\subsection{Stan implementation}
+
+Posterior inference was carried out in Stan using Hamiltonian Monte Carlo with the No-U-Turn Sampler \citep{HoffmanGelman2014,Stan2021}. This approach is well suited to the present model because the practical posterior is continuous after marginalizing over the missing ordinal reader ratings.
+
+Several aspects of the model make computation challenging. First, the posterior is high-dimensional because it includes latent semantic features for every case, reader-specific threshold vectors, hierarchical slope parameters, missing non-semantic predictors, and two correlation structures. Second, the ordinal measurement model links the latent features to both thresholds and slopes, creating posterior dependence that can slow exploration. Third, the hierarchical slope model includes both local parameters and global hyperparameters, which can further increase dependence within the posterior.
+
+To improve numerical stability, I represented the correlation matrices $C_X$ and $C_Z$ through Cholesky factors, which guarantee valid correlation matrices throughout sampling. I also used a non-centered parameterization for the slope hierarchy,
+\[
+\alpha_{jr} = \mu_a + \sigma_a \alpha_{jr}^{raw},
+\qquad
+\alpha_{jr}^{raw} \sim N(0,1),
+\]
+to improve mixing relative to a centered parameterization. This choice reduces dependence between the local slope terms and the global slope scale. This also helps maintain a continuous practical posterior, which is important for Stan's HMC implementation.
+
+Each fit used 4 chains, 800 warmup iterations, and 800 post-warmup iterations per chain. I used \texttt{adapt\_delta = 0.99} and \texttt{max\_treedepth = 13}. Simulation seeds were fixed in both R and Stan so that the design and results were reproducible. Convergence was assessed primarily with rank-normalized $\hat R$ and effective sample size summaries for key global parameters \citep{Vehtari2021}. The convergence summaries reported below therefore focus on parameters most directly related to the main inferential conclusions.
+
+\section{Simulation Study}
+
+\subsection{Simulation design}
+
+I designed a simulation study to compare the proposed method with simpler alternatives under both favorable and mildly misspecified conditions. In all settings, the data structure was fixed at
+\[
+n=300, \qquad p=3, \qquad q=2, \qquad R=2, \qquad K=4.
+\]
+For each setting, I generated 20 independent simulated datasets. This design remains moderate in size, but it is large enough to provide reasonably stable average performance summaries across settings. General principles for simulation-based method assessment are discussed by \citet{Morris2019}.
+
+The latent semantic feature vector was generated from
+\[
+X_i \sim N_3(0,C_X^{true}),
+\qquad
+C_X^{true} =
+\begin{pmatrix}
+1 & 0.45 & -0.20 \\
+0.45 & 1 & 0.30 \\
+-0.20 & 0.30 & 1
+\end{pmatrix},
+\]
+and the non-semantic predictors were generated from
+\[
+Z_i \sim N_2(0,C_Z^{true}),
+\qquad
+C_Z^{true} =
+\begin{pmatrix}
+1 & 0.25 \\
+0.25 & 1
+\end{pmatrix}.
+\]
+
+The true outcome model used
+\[
+\beta_0=-0.5, \qquad
+\beta=(1.0,-0.8,0.6)^\top, \qquad
+\gamma=(0.7,-0.5)^\top.
+\]
+The log-slope hierarchy was centered at $\mu_a=0$ with $\sigma_a=0.35$, and threshold vectors were built from the base cutpoints $(-1.0,0.3,1.2)$ with small feature and reader shifts.
+
+I considered four settings:
+
+\begin{table}[H]
+\centering
+\small
+\caption{Simulation settings.}
+\begin{tabular}{llll}
+\hline
+Setting & Truth & Reader missingness & $Z$ missingness \\
+\hline
+S1 & Correctly specified & 10\% & 0\% \\
+S2 & Correctly specified & 30\% & 20\% \\
+S3 & Mildly misspecified & 10\% & 0\% \\
+S4 & Mildly misspecified & 30\% & 20\% \\
+\hline
+\end{tabular}
+\end{table}
+
+The correctly specified settings evaluate performance when the fitted model matches the data-generating family, under light versus heavier missingness. The mildly misspecified settings are intended to assess robustness rather than complete model breakdown. Specifically, the true outcome model includes an additional nonlinear term $0.6Z_{i1}^2$ in the logit, while the fitted model remains linear in $Z$.
+
+\subsection{Comparator methods and performance metrics}
+
+I compared the Bayesian joint model with two simpler alternatives:
+
+\begin{enumerate}
+\item \textbf{Averaged-reader logistic regression:} for each feature, the available reader ratings were averaged and then used as predictors in a standard logistic regression.
+\item \textbf{Reader-1 logistic regression:} only reader 1's ratings were used, together with the non-semantic predictors, in a standard logistic regression.
+\end{enumerate}
+
+These comparators represent two common simplifications in practice: collapsing multiple readers into a single summary and using one reader as if their measurements were fixed truth.
+
+The simulation study evaluates both predictive performance and recovery of latent structure. AUC and Brier score assess downstream malignancy discrimination and calibration, while the correlation and RMSE for $X$, together with the MAE for $C_X$, assess how well the model recovers the latent semantic features and their dependence structure.
+
+\subsection{Results}
+
+Tables 2 and 3 summarize average performance across simulated datasets, and Table 4 summarizes convergence for key model parameters.
+
+\begin{table}[H]
+\centering
+\small
+\caption{Average performance under correctly specified truth.}
+\begin{tabular}{llccccc}
+\hline
+Setting & Method & AUC & Brier & $r_X$ & RMSE$(X)$ & MAE$(C_X)$ \\
+\hline
+S1 & Averaged-reader logistic & 0.695 & 0.211 & -- & -- & -- \\
+S1 & Bayesian joint model & 0.914 & 0.142 & 0.584 & 0.810 & 0.139 \\
+S1 & Reader-1 logistic & 0.686 & 0.212 & -- & -- & -- \\
+S2 & Averaged-reader logistic & 0.668 & 0.220 & -- & -- & -- \\
+S2 & Bayesian joint model & 0.943 & 0.137 & 0.563 & 0.827 & 0.155 \\
+S2 & Reader-1 logistic & 0.665 & 0.220 & -- & -- & -- \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Average performance under mildly misspecified truth.}
+\begin{tabular}{llccccc}
+\hline
+Setting & Method & AUC & Brier & $r_X$ & RMSE$(X)$ & MAE$(C_X)$ \\
+\hline
+S3 & Averaged-reader logistic & 0.666 & 0.228 & -- & -- & -- \\
+S3 & Bayesian joint model & 0.908 & 0.159 & 0.624 & 0.773 & 0.126 \\
+S3 & Reader-1 logistic & 0.664 & 0.228 & -- & -- & -- \\
+S4 & Averaged-reader logistic & 0.656 & 0.230 & -- & -- & -- \\
+S4 & Bayesian joint model & 0.938 & 0.150 & 0.559 & 0.831 & 0.137 \\
+S4 & Reader-1 logistic & 0.651 & 0.232 & -- & -- & -- \\
+\hline
+\end{tabular}
+\end{table}
+
+The main pattern is consistent across all four settings. The Bayesian joint model substantially outperformed both logistic comparators on the two most practically important metrics, AUC and Brier score. Under correctly specified truth, its AUC ranged from 0.914 to 0.943, whereas the logistic comparators remained around 0.67 to 0.70. Under mild misspecification, the Bayesian model still performed much better, with AUC values of 0.908 and 0.938 and noticeably smaller Brier scores than either comparator.
+
+These comparisons are most naturally interpreted as relative performance comparisons among methods under a common simulation design. In the joint-model setting, the reported AUC and Brier values summarize discrimination and fit of the fitted model within the simulated datasets, rather than a fully external prediction benchmark.
+
+The latent recovery results were less striking than the prediction gains, but they were stable across settings. The correlation between true and estimated latent semantic features was roughly 0.56 to 0.62, the RMSE for $X$ stayed between 0.773 and 0.831, and the off-diagonal MAE for $C_X$ ranged from 0.126 to 0.155. These results suggest that the model is not only improving fitted discrimination, but also recovering meaningful latent semantic structure.
+
+\subsection{Convergence summary}
+
+Table 4 summarizes convergence for key model parameters.
+
+\begin{table}[H]
+\centering
+\small
+\caption{Convergence summary for key model parameters.}
+\begin{tabular}{lcccc}
+\hline
+Setting & Mean key $\hat R$ & Max key $\hat R$ & Mean bulk ESS & Min bulk ESS \\
+\hline
+S1 & 1.008 & 1.054 & 1328.9 & 68.2 \\
+S2 & 1.007 & 1.045 & 976.1 & 72.1 \\
+S3 & 1.009 & 1.073 & 1383.9 & 64.9 \\
+S4 & 1.009 & 1.064 & 1072.6 & 90.9 \\
+\hline
+\end{tabular}
+\end{table}
+
+The convergence diagnostics are generally favorable across all settings. Mean $\hat R$ values are very close to 1, the maximum $\hat R$ values remain modest, and the bulk effective sample sizes for key parameters are all comfortably above levels that would raise immediate concerns about instability. While no finite simulation study can guarantee ideal behavior in every setting, these diagnostics support the numerical stability of the results reported here.
+
+\section{Summary}
+
+This paper proposed a Bayesian joint model for multi-reader ordinal semantic ratings with missing data, correlated latent semantic features, non-semantic predictors, and missing non-semantic predictors. The key modeling decision was to treat reader ratings as noisy measurements of latent semantic truth rather than as fixed observed predictors. This allows uncertainty from the semantic measurement stage to propagate directly into malignancy prediction.
+
+In the simulation study, the proposed method substantially outperformed two simpler logistic comparators in all settings, both when the fitted model was correctly specified and when the truth was mildly misspecified. The clearest gains appeared in AUC and Brier score, while recovery of the latent semantic features and their correlation structure was less pronounced but still stable.
+
+The main limitation of the method is computational burden. The model is substantially heavier than ordinary logistic regression, and the simulation study remains moderate in scope relative to the largest methodological simulation studies. Future work could consider broader simulation settings, additional comparator methods, stronger prior sensitivity analyses, and a real-data application to pulmonary nodule semantic ratings. Even in its current form, however, the framework provides a coherent Bayesian alternative to ad hoc reader-collapsing strategies.
+
+\bibliography{sample}
+
+\end{document}
