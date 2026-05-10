@@ -1,0 +1,361 @@
+---
+title: "Bayesian Method Simulation: Generate CSV Outputs"
+output:
+  html_document:
+    toc: false
+    number_sections: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+
+library(cmdstanr)
+library(posterior)
+library(dplyr)
+library(pROC)
+library(stringr)
+
+set.seed(2530)
+```
+
+```{r config, include=FALSE}
+n <- 300
+p <- 3
+q <- 2
+n_readers <- 2
+K <- 4
+n_reps <- 20
+chains <- 4
+iter_warmup <- 800
+iter_sampling <- 800
+adapt_delta <- 0.99
+max_treedepth <- 13
+refresh_rate <- 100
+stan_file <- 'study_model_csv.stan'
+
+mod <- cmdstan_model(stan_file)
+
+settings <- tibble::tribble(
+  ~setting_id, ~truth_type,      ~reader_miss, ~z_miss,
+  'S1',        'correct',        0.10,         0.00,
+  'S2',        'correct',        0.30,         0.20,
+  'S3',        'misspecified',   0.10,         0.00,
+  'S4',        'misspecified',   0.30,         0.20
+)
+```
+
+```{r helpers, include=FALSE}
+expit <- function(x) 1 / (1 + exp(-x))
+
+rmvnorm_chol <- function(n, U) {
+  z <- matrix(rnorm(n * nrow(U)), nrow = n, ncol = nrow(U))
+  z %*% U
+}
+
+ordered_logistic_probs <- function(eta, cuts) {
+  cdf_vals <- plogis(cuts - eta)
+  probs <- c(cdf_vals[1], diff(cdf_vals), 1 - cdf_vals[length(cdf_vals)])
+  pmax(probs, 1e-12)
+}
+
+safe_auc <- function(y, p) {
+  tryCatch(as.numeric(pROC::auc(response = y, predictor = p)), error = function(e) NA_real_)
+}
+
+mean_impute <- function(x) {
+  x2 <- x
+  x2[is.na(x2)] <- mean(x2, na.rm = TRUE)
+  x2
+}
+
+make_threshold_array <- function(p, n_readers, base_cuts) {
+  arr <- array(NA_real_, dim = c(p, n_readers, length(base_cuts)))
+  feature_shift <- c(-0.10, 0.00, 0.10)
+  reader_shift <- c(0.00, 0.20)
+  for (j in seq_len(p)) {
+    for (r in seq_len(n_readers)) {
+      arr[j, r, ] <- base_cuts + feature_shift[j] + reader_shift[r]
+    }
+  }
+  arr
+}
+
+extract_matrix_means <- function(summary_df, prefix, nrow_out, ncol_out) {
+  pat <- paste0('^', prefix, '\\[(\\d+),(\\d+)\\]$')
+  idx <- stringr::str_match(summary_df$variable, pat)
+  keep <- !is.na(idx[, 1])
+  out <- matrix(NA_real_, nrow = nrow_out, ncol = ncol_out)
+  if (any(keep)) {
+    rows <- as.integer(idx[keep, 2])
+    cols <- as.integer(idx[keep, 3])
+    out[cbind(rows, cols)] <- summary_df$mean[keep]
+  }
+  out
+}
+```
+
+```{r simulate, include=FALSE}
+simulate_one_dataset <- function(setting_row, n, p, q, n_readers, K) {
+  C_X_true <- matrix(
+    c(1.00, 0.45, -0.20,
+      0.45, 1.00,  0.30,
+     -0.20, 0.30,  1.00),
+    nrow = p, byrow = TRUE
+  )
+  C_Z_true <- matrix(
+    c(1.00, 0.25,
+      0.25, 1.00),
+    nrow = q, byrow = TRUE
+  )
+
+  Ux <- chol(C_X_true)
+  Uz <- chol(C_Z_true)
+
+  X_true <- rmvnorm_chol(n, Ux)
+  Z_true <- rmvnorm_chol(n, Uz)
+
+  beta0_true <- -0.50
+  beta_true <- c(1.00, -0.80, 0.60)
+  gamma_true <- c(0.70, -0.50)
+
+  mu_a_true <- 0.00
+  sigma_a_true <- 0.35
+  alpha_true <- matrix(rnorm(p * n_readers, mean = mu_a_true, sd = sigma_a_true), nrow = p, ncol = n_readers)
+  a_true <- exp(alpha_true)
+
+  c_true <- make_threshold_array(p, n_readers, base_cuts = c(-1.0, 0.3, 1.2))
+
+  eta_y <- drop(beta0_true + X_true %*% beta_true + Z_true %*% gamma_true)
+  if (setting_row$truth_type == 'misspecified') {
+    eta_y <- eta_y + 0.60 * (Z_true[, 1]^2)
+  }
+  prob_y_true <- expit(eta_y)
+  Y <- rbinom(n, size = 1, prob = prob_y_true)
+
+  rating_rows <- vector('list', length = n * p * n_readers)
+  idx <- 1L
+  for (i in seq_len(n)) {
+    for (j in seq_len(p)) {
+      for (r in seq_len(n_readers)) {
+        probs <- ordered_logistic_probs(eta = a_true[j, r] * X_true[i, j], cuts = c_true[j, r, ])
+        rating_rows[[idx]] <- c(i, j, r, sample.int(K, size = 1, prob = probs))
+        idx <- idx + 1L
+      }
+    }
+  }
+
+  rating_df <- as.data.frame(do.call(rbind, rating_rows))
+  names(rating_df) <- c('case_id', 'feat_id', 'reader_id', 'rating')
+
+  keep_rating <- runif(nrow(rating_df)) > setting_row$reader_miss
+  rating_obs <- rating_df[keep_rating, , drop = FALSE]
+
+  Z_obs <- Z_true
+  mis_z_mask <- matrix(runif(n * q) < setting_row$z_miss, nrow = n, ncol = q)
+  Z_obs[mis_z_mask] <- NA_real_
+  mis_idx <- which(is.na(Z_obs), arr.ind = TRUE)
+
+  Z_obs_for_stan <- Z_obs
+  Z_obs_for_stan[is.na(Z_obs_for_stan)] <- 0
+
+  stan_data <- list(
+    n = n,
+    p = p,
+    q = q,
+    n_readers = n_readers,
+    K = K,
+    n_obs_ratings = nrow(rating_obs),
+    case_id = as.integer(rating_obs$case_id),
+    feat_id = as.integer(rating_obs$feat_id),
+    reader_id = as.integer(rating_obs$reader_id),
+    rating = as.integer(rating_obs$rating),
+    Y = as.integer(Y),
+    Z_obs = Z_obs_for_stan,
+    n_mis_z = nrow(mis_idx),
+    mis_z_case = if (nrow(mis_idx) > 0) as.integer(mis_idx[, 1]) else integer(0),
+    mis_z_var = if (nrow(mis_idx) > 0) as.integer(mis_idx[, 2]) else integer(0)
+  )
+
+  list(
+    stan_data = stan_data,
+    Y = Y,
+    X_true = X_true,
+    Z_true = Z_true,
+    Z_obs = Z_obs,
+    C_X_true = C_X_true,
+    truth_type = setting_row$truth_type,
+    reader_miss = setting_row$reader_miss,
+    z_miss = setting_row$z_miss,
+    rating_obs = rating_obs
+  )
+}
+```
+
+```{r comparators, include=FALSE}
+build_average_features <- function(sim_dat) {
+  out <- matrix(NA_real_, nrow = length(sim_dat$Y), ncol = p)
+  for (j in seq_len(p)) {
+    sub <- sim_dat$rating_obs[sim_dat$rating_obs$feat_id == j, , drop = FALSE]
+    if (nrow(sub) > 0) {
+      avg_j <- tapply(sub$rating, sub$case_id, mean)
+      out[as.integer(names(avg_j)), j] <- as.numeric(avg_j)
+    }
+    out[, j] <- mean_impute(out[, j])
+  }
+  out
+}
+
+build_reader1_features <- function(sim_dat) {
+  out <- matrix(NA_real_, nrow = length(sim_dat$Y), ncol = p)
+  for (j in seq_len(p)) {
+    sub <- sim_dat$rating_obs[sim_dat$rating_obs$feat_id == j & sim_dat$rating_obs$reader_id == 1, , drop = FALSE]
+    if (nrow(sub) > 0) {
+      out[sub$case_id, j] <- sub$rating
+    }
+    out[, j] <- mean_impute(out[, j])
+  }
+  out
+}
+
+fit_avg_logit <- function(sim_dat) {
+  x_avg <- build_average_features(sim_dat)
+  z_imp <- apply(sim_dat$Z_obs, 2, mean_impute)
+  dat <- data.frame(Y = sim_dat$Y, x_avg, z_imp)
+  fit <- glm(Y ~ ., data = dat, family = binomial())
+  p_hat <- as.numeric(predict(fit, type = 'response'))
+  tibble(
+    method = 'Averaged-reader logistic',
+    auc = safe_auc(sim_dat$Y, p_hat),
+    brier = mean((sim_dat$Y - p_hat)^2),
+    x_cor = NA_real_,
+    x_rmse = NA_real_,
+    cx_mae = NA_real_
+  )
+}
+
+fit_reader1_logit <- function(sim_dat) {
+  x_r1 <- build_reader1_features(sim_dat)
+  z_imp <- apply(sim_dat$Z_obs, 2, mean_impute)
+  dat <- data.frame(Y = sim_dat$Y, x_r1, z_imp)
+  fit <- glm(Y ~ ., data = dat, family = binomial())
+  p_hat <- as.numeric(predict(fit, type = 'response'))
+  tibble(
+    method = 'Reader-1 logistic',
+    auc = safe_auc(sim_dat$Y, p_hat),
+    brier = mean((sim_dat$Y - p_hat)^2),
+    x_cor = NA_real_,
+    x_rmse = NA_real_,
+    cx_mae = NA_real_
+  )
+}
+```
+
+```{r extract, include=FALSE}
+extract_main_metrics <- function(fit, sim_dat) {
+  s_prob <- fit$summary(variables = 'prob_y')
+  prob_hat <- s_prob$mean
+
+  s_x <- fit$summary(variables = 'X')
+  x_hat <- extract_matrix_means(s_x, 'X', nrow_out = nrow(sim_dat$X_true), ncol_out = ncol(sim_dat$X_true))
+
+  s_cx <- fit$summary(variables = 'C_X')
+  cx_hat <- extract_matrix_means(s_cx, 'C_X', nrow_out = ncol(sim_dat$X_true), ncol_out = ncol(sim_dat$X_true))
+
+  off_diag <- upper.tri(sim_dat$C_X_true)
+
+  tibble(
+    method = 'Bayesian joint model',
+    auc = safe_auc(sim_dat$Y, prob_hat),
+    brier = mean((sim_dat$Y - prob_hat)^2),
+    x_cor = suppressWarnings(cor(as.vector(sim_dat$X_true), as.vector(x_hat))),
+    x_rmse = sqrt(mean((sim_dat$X_true - x_hat)^2)),
+    cx_mae = mean(abs(sim_dat$C_X_true[off_diag] - cx_hat[off_diag]))
+  )
+}
+
+extract_key_diagnostics <- function(fit) {
+  key_summary <- fit$summary(variables = c('beta0', 'beta', 'gamma', 'mu_a', 'sigma_a', 'C_X', 'C_Z'))
+  tibble(
+    mean_key_rhat = mean(key_summary$rhat, na.rm = TRUE),
+    max_key_rhat = max(key_summary$rhat, na.rm = TRUE),
+    mean_bulk_ess = mean(key_summary$ess_bulk, na.rm = TRUE),
+    min_bulk_ess = min(key_summary$ess_bulk, na.rm = TRUE)
+  )
+}
+```
+
+```{r run, include=FALSE}
+run_one_setting <- function(setting_row, rep_id) {
+  sim_dat <- simulate_one_dataset(setting_row, n, p, q, n_readers, K)
+
+  fit <- mod$sample(
+    data = sim_dat$stan_data,
+    chains = chains,
+    parallel_chains = chains,
+    iter_warmup = iter_warmup,
+    iter_sampling = iter_sampling,
+    adapt_delta = adapt_delta,
+    max_treedepth = max_treedepth,
+    init = 0,
+    seed = 2530 + 1000 * match(setting_row$setting_id, settings$setting_id) + rep_id,
+    refresh = refresh_rate,
+    show_messages = FALSE,
+    show_exceptions = FALSE
+  )
+
+  main_res <- extract_main_metrics(fit, sim_dat)
+  avg_res <- fit_avg_logit(sim_dat)
+  r1_res <- fit_reader1_logit(sim_dat)
+  diag_res <- extract_key_diagnostics(fit)
+
+  list(
+    performance = bind_rows(main_res, avg_res, r1_res) |>
+      mutate(
+        setting_id = setting_row$setting_id,
+        truth_type = setting_row$truth_type,
+        reader_miss = setting_row$reader_miss,
+        z_miss = setting_row$z_miss,
+        replicate = rep_id,
+        .before = 1
+      ),
+    diagnostics = diag_res |>
+      mutate(
+        setting_id = setting_row$setting_id,
+        truth_type = setting_row$truth_type,
+        reader_miss = setting_row$reader_miss,
+        z_miss = setting_row$z_miss,
+        replicate = rep_id,
+        .before = 1
+      )
+  )
+}
+
+all_perf <- vector('list', length = nrow(settings) * n_reps)
+all_diag <- vector('list', length = nrow(settings) * n_reps)
+idx <- 1L
+
+for (s in seq_len(nrow(settings))) {
+  for (rep_id in seq_len(n_reps)) {
+    cat('\n--- Running', settings$setting_id[s], 'rep', rep_id, '---\n')
+    res <- run_one_setting(settings[s, ], rep_id)
+    all_perf[[idx]] <- res$performance
+    all_diag[[idx]] <- res$diagnostics
+    idx <- idx + 1L
+  }
+}
+
+raw_results <- bind_rows(all_perf)
+diagnostics_results <- bind_rows(all_diag)
+
+write.csv(raw_results, 'simulation_raw_results.csv', row.names = FALSE)
+write.csv(diagnostics_results, 'simulation_diagnostics.csv', row.names = FALSE)
+```
+
+Simulation finished. The two files written to disk are:
+
+- `simulation_raw_results.csv`
+- `simulation_diagnostics.csv`

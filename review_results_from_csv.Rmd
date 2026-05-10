@@ -1,0 +1,124 @@
+---
+title: 'Bayesian Method Simulation: Review Results from CSV'
+output:
+  pdf_document:
+    toc: false
+  html_document:
+    toc: false
+    number_sections: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = 'center',
+  out.width = '85%'
+)
+
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+```
+
+```{r read-data, include=FALSE}
+raw_results <- read.csv('simulation_raw_results.csv')
+diagnostics_results <- read.csv('simulation_diagnostics.csv')
+
+summary_results <- raw_results |>
+  dplyr::group_by(setting_id, truth_type, reader_miss, z_miss, method) |>
+  dplyr::summarise(
+    auc = mean(auc, na.rm = TRUE),
+    brier = mean(brier, na.rm = TRUE),
+    x_cor = mean(x_cor, na.rm = TRUE),
+    x_rmse = mean(x_rmse, na.rm = TRUE),
+    cx_mae = mean(cx_mae, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+diagnostics_summary <- diagnostics_results |>
+  dplyr::group_by(setting_id, truth_type, reader_miss, z_miss) |>
+  dplyr::summarise(
+    mean_key_rhat = mean(mean_key_rhat, na.rm = TRUE),
+    max_key_rhat = max(max_key_rhat, na.rm = TRUE),
+    mean_bulk_ess = mean(mean_bulk_ess, na.rm = TRUE),
+    min_bulk_ess = min(min_bulk_ess, na.rm = TRUE),
+    .groups = 'drop'
+  )
+```
+
+Simulation design
+
+```{r design-table}
+design_table <- summary_results |>
+  dplyr::distinct(setting_id, truth_type, reader_miss, z_miss) |>
+  dplyr::arrange(setting_id) |>
+  dplyr::mutate(
+    Truth = dplyr::case_when(
+      truth_type == 'correct' ~ 'Correctly specified',
+      TRUE ~ 'Mildly misspecified'
+    ),
+    `Reader missingness` = paste0(round(100 * reader_miss), '%'),
+    `Z missingness` = paste0(round(100 * z_miss), '%')
+  ) |>
+  dplyr::select(Setting = setting_id, Truth, `Reader missingness`, `Z missingness`)
+
+knitr::kable(design_table, caption = 'Simulation settings used in the run.', align = 'lccc', booktabs = TRUE) |>
+  kableExtra::kable_styling(latex_options = c('hold_position', 'scale_down'))
+```
+
+Results
+
+```{r correct-table}
+correct_table <- summary_results |>
+  dplyr::filter(truth_type == 'correct') |>
+  dplyr::select(Setting = setting_id, Method = method, AUC = auc, Brier = brier, `X cor` = x_cor, `X RMSE` = x_rmse, `C_X MAE` = cx_mae)
+
+knitr::kable(correct_table, digits = 3, caption = 'Average performance under correctly specified truth.', booktabs = TRUE) |>
+  kableExtra::kable_styling(latex_options = c('hold_position', 'scale_down'))
+```
+
+```{r misspecified-table}
+misspecified_table <- summary_results |>
+  dplyr::filter(truth_type == 'misspecified') |>
+  dplyr::select(Setting = setting_id, Method = method, AUC = auc, Brier = brier, `X cor` = x_cor, `X RMSE` = x_rmse, `C_X MAE` = cx_mae)
+
+knitr::kable(misspecified_table, digits = 3, caption = 'Average performance under mildly misspecified truth.', booktabs = TRUE) |>
+  kableExtra::kable_styling(latex_options = c('hold_position', 'scale_down'))
+```
+
+```{r auc-plot}
+summary_results |>
+  ggplot(aes(x = setting_id, y = auc, group = method, shape = method)) +
+  geom_line() +
+  geom_point(size = 2.5) +
+  labs(x = 'Setting', y = 'Average AUC', shape = 'Method') +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(hjust = 0.5, size = 14))
+```
+
+```{r brier-plot}
+summary_results |>
+  ggplot(aes(x = setting_id, y = brier, group = method, shape = method)) +
+  geom_line() +
+  geom_point(size = 2.5) +
+  labs(x = 'Setting', y = 'Average Brier score', shape = 'Method') +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(hjust = 0.5, size = 14))
+```
+
+```{r convergence-table}
+conv_table <- diagnostics_summary |>
+  dplyr::select(
+    Setting = setting_id,
+    `Mean key R-hat` = mean_key_rhat,
+    `Max key R-hat` = max_key_rhat,
+    `Mean bulk ESS` = mean_bulk_ess,
+    `Min bulk ESS` = min_bulk_ess
+  )
+
+knitr::kable(conv_table, digits = 3, caption = 'Convergence summary for key model parameters.', booktabs = TRUE) |>
+  kableExtra::kable_styling(latex_options = c('hold_position', 'scale_down'))
+```
